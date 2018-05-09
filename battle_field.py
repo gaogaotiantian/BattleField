@@ -119,6 +119,9 @@ class Player(GameObject):
         self.moveSpeed = 50
         self.width = 48
         self.height = 48
+        self.id = 0
+        self.hp = 100
+        self.dead = False
 
     def getInfo(self):
         ret = {}
@@ -127,8 +130,24 @@ class Player(GameObject):
         ret['angle'] = self.moveAngle
         ret['speed'] = self.speed
         ret['id'] = self.id
+        ret['dead'] = self.dead
 
         return ret
+
+    def move(self, time, m):
+        if time != 0:
+            newPos = self.pos.getShift(self.moveAngle, self.speed*time)
+            oldPos = self.pos.copy()
+            self.pos = newPos
+            # If already arrived at position or collide, stop
+            if (self.pos.getDist(self.moveDestination) > oldPos.getDist(self.moveDestination)) or \
+                    m.collide(self):
+                self.pos = oldPos
+                self.speed = 0
+                return False
+            return True
+
+        return False
 
 class Bullet(GameObject):
     def __init__(self):
@@ -147,6 +166,19 @@ class Bullet(GameObject):
 
         return ret
 
+    def move(self, time, m):
+        if time != 0:
+            newPos = self.pos.getShift(self.moveAngle, self.speed*time)
+            oldPos = self.pos.copy()
+            self.pos = newPos
+            # If already arrived at position or collide, stop
+            if m.collide(self):
+                self.pos = oldPos
+                self.speed = 0
+                return False
+            return True
+        return False
+
 class Game:
     def __init__(self):
         self.width = 30
@@ -158,9 +190,9 @@ class Game:
         self.currFrame = 0
         self.startTime = 0
         self.players = []
-        self.playerId = 0
+        self.playerId = 1
         self.bullets = []
-        self.bulletId = 0
+        self.bulletId = 1
 
     def addPlayer(self, p):
         self.players.append(p)
@@ -168,17 +200,61 @@ class Game:
     def addBullet(self, b):
         self.bullets.append(b)
 
+    def joinGame(self, channel):
+        p = self.getPlayerByChannel(channel)
+        if p:
+            if p.dead:
+                p.hp = 100
+                p.dead = False
+            return p.id
+        p = Player()
+        p.setPos(400, 400)
+        p.speed = 50
+        p.channel = channel
+        p.id = self.playerId
+        self.playerId += 1
+        self.addPlayer(p)
+        return p.id
+
+    def getPlayerById(self, id):
+        for p in self.players:
+            if p.id == id:
+                return p
+        return None
+    
+    def getPlayerByChannel(self, channel):
+        for p in self.players:
+            if p.channel == channel:
+                return p
+        return None
+
+    def newBullet(self, playerId):
+        player = self.getPlayerById(playerId)
+        if player != None and not player.dead:
+            bullet = Bullet()
+            bullet.setPos(player.pos.getShift(player.moveAngle, player.width))
+            bullet.setSpeed(200)
+            bullet.setAngle(player.moveAngle)
+            bullet.id = self.bulletId
+            bullet.player = playerId
+            self.bulletId += 1
+            self.addBullet(bullet)
+
     def updatePlayers(self):
         for player in self.players:
             player.move(1.0/self.framePerSec, self.gameMap)
 
     def updateBullets(self):
+        newBullets = []
         for bullet in self.bullets:
-            bullet.move(1.0/self.framePerSec, self.gameMap)
+            if bullet.move(1.0/self.framePerSec, self.gameMap):
+                newBullets.append(bullet)
+        self.bullets = newBullets
 
     def updateFrame(self):
         self.updatePlayers()
         self.updateBullets()
+        self.checkHit()
         self.currFrame += 1
 
     def getDynamicGameInfo(self):
@@ -207,22 +283,36 @@ class Game:
         for action in actions:
             actionType = action['actionType']
             if actionType == 'move':
-                self.players[0].setMove(action['x'], action['y'], self.players[0].moveSpeed)
-            if actionType == 'shoot':
-                bullet = Bullet()
-                bullet.setPos(self.players[0].pos)
-                bullet.setSpeed(200)
-                bullet.setAngle(self.players[0].moveAngle)
-                bullet.id = self.bulletId
-                self.bulletId += 1
-                self.addBullet(bullet)
+                if 'player' in action:
+                    player = self.getPlayerById(action['player'])
+                    if player and not player.dead:
+                        player.setMove(action['x'], action['y'], player.moveSpeed)
+            elif actionType == 'shoot':
+                if 'player' in action:
+                    self.newBullet(action['player'])
+            elif actionType == 'join':
+                channel = action['channel']
+                id = self.joinGame(action['channel'])
+                self.redisConn.publishJoin(channel, id)
 
+    def checkHit(self):
+        newBullets = []
+        newPlayers = []
+        for b in self.bullets:
+            bulletHit = False
+            for p in self.players:
+                if not p.dead and b.player != p.id and p.pos.getDist(b.pos) < p.width + b.width:
+                    p.hp -= 10
+                    bulletHit = True
+            if not bulletHit:
+                newBullets.append(b)
+        for p in self.players:
+            if p.hp <= 0 and p.dead == False:
+                p.dead = True
+                self.redisConn.publishEvent({"eventType":"playerDown", "id":p.id})
+        self.bullets = newBullets
 
     def run(self):
-        p = Player()
-        p.setPos(400, 400)
-        p.speed = 50
-        self.addPlayer(p)
         self.startTime = time.time()
         while True:
             currTime = time.time()
@@ -241,11 +331,17 @@ class RedisConn:
         redisConn.set("playerPos", str(pos), ex=3600)
 
     def setDynamicGameInfo(self, info):
-        print(info)
         redisConn.set("dynamicGameInfo", json.dumps(info), ex=3600)
 
     def setStaticMapInfo(self, info):
         redisConn.set("staticMapInfo", json.dumps(info), ex=3600)
+
+    def publishEvent(self, event):
+        redisConn.publish('events', json.dumps({'infoType':'event', 'event':event}))
+
+    def publishJoin(self, channel, id):
+        redisConn.publish('events', json.dumps({'infoType':'joinInfo', 'channel':channel, 'id': id}))
+
 
     def getActions(self):
         pipe = redisConn.pipeline()
