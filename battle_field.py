@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import math
+import functools
 
 import redis
 import random
@@ -16,6 +17,24 @@ else:
     
 pool = redis.BlockingConnectionPool.from_url(REDIS_URL, max_connections=9)
 redisConn = redis.Redis(connection_pool = pool)
+
+GRID_SIZE = 64
+
+# decorator
+def actionRequire(*required_args):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kw):
+            if 'action' in kw:
+                action = kw['action']
+                for r in required_args:
+                    if r not in action:
+                        print("Error on input, need {}, get{}".format(r, action))
+                        return False
+            return func(*args, **kw)
+        return wrapper
+    return decorator
+
 class Point:
     def __init__(self, x = 0, y = 0):
         self.x = x
@@ -34,9 +53,9 @@ class Point:
         return "({}, {})".format(self.x, self.y)
 
 class MapCell:
-    def __init__(self):
+    def __init__(self, tile = 1):
         self.walkable = True
-        self.tile = 1
+        self.tile = tile
     def getInfo(self):
         return {'tile':self.tile}
 
@@ -44,8 +63,8 @@ class Map:
     def __init__(self, height = 30, width = 30):
         self.height = height
         self.width = width
-        self.data = [[MapCell() for i in range(self.width)] for j in range(self.height)]
-        self.gridSize = 32
+        self.data = [[MapCell(tile = i) for i in range(self.width)] for j in range(self.height)]
+        self.gridSize = GRID_SIZE
 
     def collide(self, obj):
         if obj.pos.x - obj.width/2 < 0 or obj.pos.x + obj.width/2 > self.gridSize * self.width \
@@ -68,8 +87,25 @@ class Map:
         mapInfo['tile'] = tileInfo
 
         return mapInfo
-
-
+    
+    def getRandomWalkableCoord(self):
+        while True:
+            i = random.randint(0, self.height)
+            j = random.randint(0, self.width)
+            if self.data[i][j].walkable:
+                return (j*self.gridSize + self.gridSize/2, i*self.gridSize + self.gridSize/2)
+    
+    def loadJson(self, fileName):
+        with open(fileName) as f:
+            jsonData = json.load(f)
+            layer = jsonData['layers'][0]['data']
+            for i in range(self.height):
+                for j in range(self.width):
+                    tileId = layer[i*self.width + j]
+                    if tileId > 100:
+                        self.data[i][j].walkable = False
+                    else:
+                        self.data[i][j].walkable = True
 
 class GameObject:
     def __init__(self):
@@ -78,8 +114,8 @@ class GameObject:
         self.moveDestination = Point()
         self.moveAngle = 0
         self.speed = 0
-        self.width = 32
-        self.height = 32
+        self.width = 64
+        self.height = 64
 
     def setPos(self, px, y = 0):
         if type(px) == Point:
@@ -116,7 +152,7 @@ class GameObject:
 class Player(GameObject):
     def __init__(self):
         GameObject.__init__(self)
-        self.moveSpeed = 50
+        self.moveSpeed = 100
         self.width = 48
         self.height = 48
         self.id = 0
@@ -183,10 +219,11 @@ class Game:
     def __init__(self):
         self.width = 30
         self.height = 30
-        self.gridSize = 32
+        self.gridSize = GRID_SIZE
         self.redisConn = RedisConn()
         self.framePerSec = 10
         self.gameMap = Map(height = self.height, width = self.width)
+        self.gameMap.loadJson('./map.json')
         self.currFrame = 0
         self.startTime = 0
         self.players = []
@@ -208,7 +245,8 @@ class Game:
                 p.dead = False
             return p.id
         p = Player()
-        p.setPos(400, 400)
+        x, y = self.gameMap.getRandomWalkableCoord()
+        p.setPos(x, y)
         p.speed = 50
         p.channel = channel
         p.id = self.playerId
@@ -228,15 +266,14 @@ class Game:
                 return p
         return None
 
-    def newBullet(self, playerId):
-        player = self.getPlayerById(playerId)
+    def newBullet(self, pos, speed, angle, player):
         if player != None and not player.dead:
             bullet = Bullet()
-            bullet.setPos(player.pos.getShift(player.moveAngle, player.width))
-            bullet.setSpeed(200)
-            bullet.setAngle(player.moveAngle)
+            bullet.setPos(pos)
+            bullet.setSpeed(speed)
+            bullet.setAngle(angle)
             bullet.id = self.bulletId
-            bullet.player = playerId
+            bullet.player = player.id
             self.bulletId += 1
             self.addBullet(bullet)
 
@@ -279,6 +316,7 @@ class Game:
 
         return info
 
+    # Parse Actions
     def doActions(self, actions):
         for action in actions:
             actionType = action['actionType']
@@ -289,11 +327,22 @@ class Game:
                         player.setMove(action['x'], action['y'], player.moveSpeed)
             elif actionType == 'shoot':
                 if 'player' in action:
-                    self.newBullet(action['player'])
+                    self.actionShoot(action)
+
             elif actionType == 'join':
                 channel = action['channel']
                 id = self.joinGame(action['channel'])
                 self.redisConn.publishJoin(channel, id)
+    
+    @actionRequire("player", "x", "y")
+    def actionShoot(self, action):
+        player = self.getPlayerById(action['player'])
+        if player and not player.dead:
+            angle = player.pos.getAngle(Point(action['x'], action['y']))
+            pos = player.pos.getShift(angle, player.width)
+            player.setSpeed(0)
+            player.setAngle(angle)
+            self.newBullet(pos = pos, angle = angle, player = player, speed = 200)
 
     def checkHit(self):
         newBullets = []
