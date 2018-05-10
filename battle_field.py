@@ -157,7 +157,10 @@ class Player(GameObject):
         self.height = 48
         self.id = 0
         self.hp = 100
+        self.lastAction = None
         self.dead = False
+        self.kill = 0
+        self.death = 0
 
     def getInfo(self):
         ret = {}
@@ -167,6 +170,8 @@ class Player(GameObject):
         ret['speed'] = self.speed
         ret['id'] = self.id
         ret['dead'] = self.dead
+        ret['kill'] = self.kill
+        ret['death'] = self.death
 
         return ret
 
@@ -250,6 +255,7 @@ class Game:
         p.speed = 50
         p.channel = channel
         p.id = self.playerId
+        p.lastAction = time.time()
         self.playerId += 1
         self.addPlayer(p)
         return p.id
@@ -324,6 +330,7 @@ class Game:
                 if 'player' in action:
                     player = self.getPlayerById(action['player'])
                     if player and not player.dead:
+                        player.lastAction = time.time()
                         player.setMove(action['x'], action['y'], player.moveSpeed)
             elif actionType == 'shoot':
                 if 'player' in action:
@@ -333,16 +340,28 @@ class Game:
                 channel = action['channel']
                 id = self.joinGame(action['channel'])
                 self.redisConn.publishJoin(channel, id)
+
+            elif actionType == 'leave':
+
     
     @actionRequire("player", "x", "y")
     def actionShoot(self, action):
         player = self.getPlayerById(action['player'])
         if player and not player.dead:
+            player.lastAction = time.time()
             angle = player.pos.getAngle(Point(action['x'], action['y']))
             pos = player.pos.getShift(angle, player.width)
             player.setSpeed(0)
             player.setAngle(angle)
             self.newBullet(pos = pos, angle = angle, player = player, speed = 200)
+
+    @actionRequire("channel")
+    def actionLeave(self, action):
+        channel = action['channel']
+        for i in range(len(self.players)):
+            if self.players[i].channel == channel:
+                self.players.pop(i)
+                break
 
     def checkHit(self):
         newBullets = []
@@ -353,12 +372,19 @@ class Game:
                 if not p.dead and b.player != p.id and p.pos.getDist(b.pos) < p.width + b.width:
                     p.hp -= 10
                     bulletHit = True
+                    if p.hp <= 0 and p.dead == False:
+                        atkPlayer = self.getPlayerById(b.player)
+                        if atkPlayer:
+                            atkPlayer.kill += 1
+                        p.dead = True
+                        p.death += 1
             if not bulletHit:
                 newBullets.append(b)
         for p in self.players:
-            if p.hp <= 0 and p.dead == False:
-                p.dead = True
-                self.redisConn.publishEvent({"eventType":"playerDown", "id":p.id})
+            if p.lastAction >= time.time() - 60:
+                newPlayers.append(p)
+
+        self.players = newPlayers
         self.bullets = newBullets
 
     def run(self):
