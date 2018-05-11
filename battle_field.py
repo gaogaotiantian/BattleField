@@ -456,7 +456,7 @@ class Game:
         self.updatePlayers()
         self.updateBullets()
         self.checkHit()
-        if len(self.items) < 5*len(self.players) and random.uniform(0, 1) < 0.005 * len(self.players):
+        if len(self.items) < 5 + 2*len(self.players) and random.uniform(0, 1) < 0.005 + 0.001*len(self.players):
             self.generateItem()
         self.currFrame += 1
 
