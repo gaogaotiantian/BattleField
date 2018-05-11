@@ -111,6 +111,95 @@ class Map:
                     else:
                         self.data[i][j].walkable = True
 
+class Weapon:
+    def __init__(self):
+        self.name = ""
+        self.gap  = 2
+        self.damage = 5
+        self.size = 1
+        self.speed = 200
+        self.lastFire = 0
+        self.length = 300
+
+    def fire(self, pos, angle, player, currTime, id):
+        if currTime - self.lastFire > self.gap:
+            b = Bullet()
+            b.setPos(pos)
+            b.setSpeed(self.speed)
+            b.setAngle(angle)
+            b.id = id
+            b.player = player.id
+            b.width = self.size
+            b.height = self.size
+            b.length = self.length
+            self.lastFire = currTime
+            return [b]
+        return None
+
+class WeaponBase(Weapon):
+    def __init__(self):
+        Weapon.__init__(self)
+        
+class WeaponPistol(Weapon):
+    def __init__(self):
+        Weapon.__init__(self)
+        self.gap = 1.5
+        self.damage = 7
+        self.size = 3
+
+class WeaponMp40(Weapon):
+    def __init__(self):
+        Weapon.__init__(self)
+        self.gap = 0.15
+        self.damage = 10
+        self.size = 4
+        self.speed = 300
+        self.length = 600
+
+class WeaponMp43(Weapon):
+    def __init__(self):
+        Weapon.__init__(self)
+        self.gap = 0.2
+        self.damage = 20
+        self.size = 6
+        self.speed = 300
+        self.length = 700
+
+class WeaponM1(Weapon):
+    def __init__(self):
+        Weapon.__init__(self)
+        self.gap = 3
+        self.damage = 70
+        self.size = 10
+        self.speed = 450
+        self.length = 1000
+
+class WeaponFg42(Weapon):
+    def __init__(self):
+        Weapon.__init__(self)
+        self.gap = 1.2
+        self.damage = 10
+        self.size = 4
+        self.speed = 300
+        self.length = 400
+    def fire(self, pos, angle, player, currTime, id):
+        if currTime - self.lastFire > self.gap:
+            ret = []
+            for i in range(5):
+                b = Bullet()
+                b.setPos(pos)
+                b.setSpeed(self.speed)
+                b.setAngle(angle+0.1*i-0.2)
+                b.id = id+i
+                b.player = player.id
+                b.width = self.size
+                b.height = self.size
+                b.length = self.length
+                self.lastFire = currTime
+                ret.append(b)
+            return ret
+        return None
+
 class GameObject:
     def __init__(self):
         self.id = 1
@@ -157,6 +246,7 @@ class Player(GameObject):
     def __init__(self):
         GameObject.__init__(self)
         self.name = ""
+        self.weapon = WeaponBase()
         self.moveSpeed = 100
         self.width = 40
         self.height = 40
@@ -166,6 +256,12 @@ class Player(GameObject):
         self.dead = False
         self.kill = 0
         self.death = 0
+
+    def reborn(self, pos):
+        self.pos = pos
+        self.hp = 100
+        self.weapon = WeaponBase()
+        self.dead = False
 
     def getInfo(self):
         ret = {}
@@ -203,11 +299,13 @@ class Bullet(GameObject):
         self.speed = 200
         self.width = 10
         self.height = 10
+        self.length = 100
     
     def getInfo(self):
         ret = {}
         ret['x'] = self.pos.x
         ret['y'] = self.pos.y
+        ret['size'] = self.width
         ret['angle'] = self.moveAngle
         ret['speed'] = self.speed
         ret['id'] = self.id
@@ -231,7 +329,7 @@ class Item(GameObject):
     def __init__(self, itemType = None):
         GameObject.__init__(self)
         if itemType == None:
-            self.itemType = random.choice(['health'])
+            self.itemType = random.choice(['health', 'german_pistol', 'mp_43', 'm1_carbine', 'mp_40', 'fg_42'])
         else:
             self.itemType = itemType
     
@@ -247,6 +345,16 @@ class Item(GameObject):
     def buff(self, player):
         if self.itemType == 'health':
             player.hp = min(player.hp + 20, 100)
+        elif self.itemType == 'german_pistol':
+            player.weapon = WeaponPistol()
+        elif self.itemType == 'mp_43':
+            player.weapon = WeaponMp43()
+        elif self.itemType == 'm1_carbine':
+            player.weapon = WeaponM1()
+        elif self.itemType == 'mp_40':
+            player.weapon = WeaponMp40()
+        elif self.itemType == 'fg_42':
+            player.weapon = WeaponFg42()
 
 class Game:
     def __init__(self):
@@ -275,13 +383,12 @@ class Game:
 
     def joinGame(self, channel, name):
         p = self.getPlayerByChannel(channel)
+        x, y = self.gameMap.getRandomWalkableCoord()
         if p:
             if p.dead:
-                p.hp = 100
-                p.dead = False
+                p.reborn(Point(x,y))
             return p.id
         p = Player()
-        x, y = self.gameMap.getRandomWalkableCoord()
         p.setPos(x, y)
         p.speed = 50
         p.channel = channel
@@ -323,7 +430,9 @@ class Game:
         newBullets = []
         for bullet in self.bullets:
             if bullet.move(1.0/self.framePerSec, self.gameMap):
-                newBullets.append(bullet)
+                bullet.length -= bullet.speed / self.framePerSec
+                if bullet.length > 0:
+                    newBullets.append(bullet)
         self.bullets = newBullets
 
     def generateItem(self):
@@ -391,12 +500,17 @@ class Game:
     def actionShoot(self, action):
         player = self.getPlayerById(action['player'])
         if player and not player.dead:
-            player.lastAction = time.time()
             angle = player.pos.getAngle(Point(action['x'], action['y']))
             pos = player.pos.getShift(angle, player.width)
-            player.setSpeed(0)
-            player.setAngle(angle)
-            self.newBullet(pos = pos, angle = angle, player = player, speed = 200)
+            bList = player.weapon.fire(pos = pos, angle = angle, player = player, id = self.bulletId, currTime = self.currFrame / self.framePerSec)
+            if bList != None:
+                for b in bList:
+                    player.lastAction = time.time()
+
+                    player.setSpeed(0)
+                    player.setAngle(angle)
+                    self.addBullet(b)
+                    self.bulletId += 1
 
     @actionRequire("channel", "name")
     def actionJoin(self, action):
