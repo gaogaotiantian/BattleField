@@ -1,12 +1,14 @@
+from gevent import monkey; monkey.patch_all()
 import os
 import sys
 import time
 import math
 import functools
-
-import redis
 import random
 import json
+
+import redis
+import gevent
 
 if os.environ.get("REDISCLOUD_URL"):
     REDIS_URL = os.environ.get("REDISCLOUD_URL")
@@ -27,10 +29,12 @@ def actionRequire(*required_args):
         def wrapper(*args, **kw):
             if 'action' in kw:
                 action = kw['action']
-                for r in required_args:
-                    if r not in action:
-                        print("Error on input, need {}, get{}".format(r, action))
-                        return False
+            else:
+                action = args[1]
+            for r in required_args:
+                if r not in action:
+                    print("Error on input, need {}, get{}".format(r, action))
+                    return False
             return func(*args, **kw)
         return wrapper
     return decorator
@@ -90,8 +94,8 @@ class Map:
     
     def getRandomWalkableCoord(self):
         while True:
-            i = random.randint(0, self.height)
-            j = random.randint(0, self.width)
+            i = random.randrange(0, self.height)
+            j = random.randrange(0, self.width)
             if self.data[i][j].walkable:
                 return (j*self.gridSize + self.gridSize/2, i*self.gridSize + self.gridSize/2)
     
@@ -152,9 +156,10 @@ class GameObject:
 class Player(GameObject):
     def __init__(self):
         GameObject.__init__(self)
+        self.name = ""
         self.moveSpeed = 100
-        self.width = 48
-        self.height = 48
+        self.width = 40
+        self.height = 40
         self.id = 0
         self.hp = 100
         self.lastAction = None
@@ -166,6 +171,8 @@ class Player(GameObject):
         ret = {}
         ret['x'] = self.pos.x
         ret['y'] = self.pos.y
+        ret['hp'] = self.hp
+        ret['name'] = self.name
         ret['angle'] = self.moveAngle
         ret['speed'] = self.speed
         ret['id'] = self.id
@@ -220,6 +227,27 @@ class Bullet(GameObject):
             return True
         return False
 
+class Item(GameObject):
+    def __init__(self, itemType = None):
+        GameObject.__init__(self)
+        if itemType == None:
+            self.itemType = random.choice(['health'])
+        else:
+            self.itemType = itemType
+    
+    def getInfo(self):
+        ret = {}
+        ret['id'] = self.id
+        ret['x'] = self.pos.x
+        ret['y'] = self.pos.y
+        ret['itemType'] = self.itemType
+        
+        return ret
+
+    def buff(self, player):
+        if self.itemType == 'health':
+            player.hp = min(player.hp + 20, 100)
+
 class Game:
     def __init__(self):
         self.width = 30
@@ -235,6 +263,9 @@ class Game:
         self.playerId = 1
         self.bullets = []
         self.bulletId = 1
+        self.items = []
+        self.itemId = 1
+        self.eventQueue = []
 
     def addPlayer(self, p):
         self.players.append(p)
@@ -242,7 +273,7 @@ class Game:
     def addBullet(self, b):
         self.bullets.append(b)
 
-    def joinGame(self, channel):
+    def joinGame(self, channel, name):
         p = self.getPlayerByChannel(channel)
         if p:
             if p.dead:
@@ -255,6 +286,7 @@ class Game:
         p.speed = 50
         p.channel = channel
         p.id = self.playerId
+        p.name = name
         p.lastAction = time.time()
         self.playerId += 1
         self.addPlayer(p)
@@ -294,10 +326,20 @@ class Game:
                 newBullets.append(bullet)
         self.bullets = newBullets
 
+    def generateItem(self):
+        x, y = self.gameMap.getRandomWalkableCoord()
+        item = Item()
+        item.id = self.itemId
+        item.setPos(x, y)
+        self.itemId += 1
+        self.items.append(item)
+
     def updateFrame(self):
         self.updatePlayers()
         self.updateBullets()
         self.checkHit()
+        if len(self.items) < 5*len(self.players) and random.uniform(0, 1) < 0.005 * len(self.players):
+            self.generateItem()
         self.currFrame += 1
 
     def getDynamicGameInfo(self):
@@ -305,12 +347,16 @@ class Game:
         info['infoType'] = 'dynamicGameInfo'
         playerInfo = []
         bulletInfo = []
+        itemInfo   = []
         for player in self.players:
             playerInfo.append(player.getInfo())
         for bullet in self.bullets:
             bulletInfo.append(bullet.getInfo())
+        for item in self.items:
+            itemInfo.append(item.getInfo())
         info['players'] = playerInfo
         info['bullets'] = bulletInfo
+        info['items']   = itemInfo
         info['timestamp'] = self.currFrame / self.framePerSec
 
         return info
@@ -333,16 +379,13 @@ class Game:
                         player.lastAction = time.time()
                         player.setMove(action['x'], action['y'], player.moveSpeed)
             elif actionType == 'shoot':
-                if 'player' in action:
-                    self.actionShoot(action)
+                self.actionShoot(action)
 
             elif actionType == 'join':
-                channel = action['channel']
-                id = self.joinGame(action['channel'])
-                self.redisConn.publishJoin(channel, id)
+                self.actionJoin(action)
 
             elif actionType == 'leave':
-
+                self.actionLeave(action)
     
     @actionRequire("player", "x", "y")
     def actionShoot(self, action):
@@ -355,6 +398,12 @@ class Game:
             player.setAngle(angle)
             self.newBullet(pos = pos, angle = angle, player = player, speed = 200)
 
+    @actionRequire("channel", "name")
+    def actionJoin(self, action):
+        channel = action['channel']
+        id = self.joinGame(action['channel'], action['name'])
+        self.redisConn.publishJoin(channel, id)
+
     @actionRequire("channel")
     def actionLeave(self, action):
         channel = action['channel']
@@ -366,12 +415,14 @@ class Game:
     def checkHit(self):
         newBullets = []
         newPlayers = []
+        newItems   = []
         for b in self.bullets:
             bulletHit = False
             for p in self.players:
                 if not p.dead and b.player != p.id and p.pos.getDist(b.pos) < p.width + b.width:
                     p.hp -= 10
                     bulletHit = True
+                    self.eventQueue.append({'eventType':'bulletHit', 'player':p.id})
                     if p.hp <= 0 and p.dead == False:
                         atkPlayer = self.getPlayerById(b.player)
                         if atkPlayer:
@@ -380,12 +431,25 @@ class Game:
                         p.death += 1
             if not bulletHit:
                 newBullets.append(b)
+
+        # Check for items
+        for item in self.items:
+            itemHit = False
+            for p in self.players:
+                if not p.dead and p.pos.getDist(item.pos) < p.width:
+                    item.buff(p)
+                    itemHit = True
+            if not itemHit:
+                newItems.append(item)
+
+        # Get rid of inactive players
         for p in self.players:
             if p.lastAction >= time.time() - 60:
                 newPlayers.append(p)
 
         self.players = newPlayers
         self.bullets = newBullets
+        self.items   = newItems
 
     def run(self):
         self.startTime = time.time()
@@ -398,24 +462,24 @@ class Game:
             
             self.redisConn.setDynamicGameInfo(self.getDynamicGameInfo())
             self.redisConn.setStaticMapInfo(self.getStaticMapInfo())
+            for event in self.eventQueue:
+                self.redisConn.publishEvent(event)
+            self.eventQueue = []
 
 
 
 class RedisConn:
-    def setPlayerPos(self, pos):
-        redisConn.set("playerPos", str(pos), ex=3600)
-
     def setDynamicGameInfo(self, info):
-        redisConn.set("dynamicGameInfo", json.dumps(info), ex=3600)
+        gevent.spawn(redisConn.set, "dynamicGameInfo", json.dumps(info), ex=3600)
 
     def setStaticMapInfo(self, info):
-        redisConn.set("staticMapInfo", json.dumps(info), ex=3600)
+        gevent.spawn(redisConn.set, "staticMapInfo", json.dumps(info), ex=3600)
 
     def publishEvent(self, event):
-        redisConn.publish('events', json.dumps({'infoType':'event', 'event':event}))
+        gevent.spawn(redisConn.publish, 'events', json.dumps({'infoType':'event', 'event':event}))
 
     def publishJoin(self, channel, id):
-        redisConn.publish('events', json.dumps({'infoType':'joinInfo', 'channel':channel, 'id': id}))
+        gevent.spawn(redisConn.publish, 'events', json.dumps({'infoType':'joinInfo', 'channel':channel, 'id': id}))
 
 
     def getActions(self):
