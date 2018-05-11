@@ -17,7 +17,7 @@ else:
     print("No redis url!")
     sys.exit(1)
     
-pool = redis.BlockingConnectionPool.from_url(REDIS_URL, max_connections=9)
+pool = redis.BlockingConnectionPool.from_url(REDIS_URL, max_connections=4)
 redisConn = redis.Redis(connection_pool = pool)
 
 GRID_SIZE = 64
@@ -120,9 +120,15 @@ class Weapon:
         self.speed = 200
         self.lastFire = 0
         self.length = 300
+        self.weight = 0
+        self.possibleFeatures = set(["bounce", "penetrate", "zigzag", "variantSpeed", "doubleLength"])
+        self.features = set()
 
-    def fire(self, pos, angle, player, currTime, id):
-        if currTime - self.lastFire > self.gap:
+    def addFeature(self, feature):
+        self.features.add(feature)
+
+    def fire(self, pos, angle, player, currTime, id, checkGap = True):
+        if (not checkGap) or currTime - self.lastFire > self.gap:
             b = Bullet()
             b.setPos(pos)
             b.setSpeed(self.speed)
@@ -133,6 +139,10 @@ class Weapon:
             b.width = self.size
             b.height = self.size
             b.length = self.length
+            for feature in self.features:
+                b.features.add(feature)
+            if b.hasFeature('doubleLength'):
+                b.length *= 2
             self.lastFire = currTime
             return [b]
         return None
@@ -140,67 +150,82 @@ class Weapon:
 class WeaponBase(Weapon):
     def __init__(self):
         Weapon.__init__(self)
+        self.name = 'base'
+        self.weight = 5
         
 class WeaponPistol(Weapon):
     def __init__(self):
         Weapon.__init__(self)
+        self.name = 'german_pistol'
         self.gap = 1.5
         self.damage = 7
         self.size = 3
+        self.weight = 5
 
 class WeaponMp40(Weapon):
     def __init__(self):
         Weapon.__init__(self)
+        self.name = 'mp_40'
         self.gap = 0.15
         self.damage = 10
         self.size = 4
         self.speed = 300
         self.length = 600
+        self.weight = 10
 
 class WeaponMp43(Weapon):
     def __init__(self):
         Weapon.__init__(self)
+        self.name = 'mp_43'
         self.gap = 0.2
         self.damage = 20
         self.size = 6
         self.speed = 300
+        self.weight = 20
         self.length = 700
 
 class WeaponM1(Weapon):
     def __init__(self):
         Weapon.__init__(self)
+        self.name = 'm1_carbine'
         self.gap = 3
         self.damage = 70
         self.size = 10
         self.speed = 450
         self.length = 1000
+        self.weight = 25
 
 class WeaponFg42(Weapon):
     def __init__(self):
         Weapon.__init__(self)
+        self.name = 'fg_42'
         self.gap = 1.2
         self.damage = 10
         self.size = 4
         self.speed = 300
         self.length = 400
+        self.weight = 20
     def fire(self, pos, angle, player, currTime, id):
         if currTime - self.lastFire > self.gap:
             ret = []
             for i in range(5):
-                b = Bullet()
-                b.setPos(pos)
-                b.setSpeed(self.speed)
-                b.setAngle(angle+0.1*i-0.2)
-                b.damage = self.damage
-                b.id = id+i
-                b.player = player.id
-                b.width = self.size
-                b.height = self.size
-                b.length = self.length
-                self.lastFire = currTime
-                ret.append(b)
-            return ret
+                b = Weapon.fire(self, pos, angle+0.1*i-0.2, player, currTime, id, checkGap = False)
+                if b:
+                    id += 1
+                    ret += b
+            if len(ret) > 0:
+                return ret
         return None
+
+class WeaponAr(Weapon):
+    def __init__(self):
+        Weapon.__init__(self)
+        self.name = 'ar'
+        self.gap = 1
+        self.damage = 15
+        self.size = 5
+        self.speed = 350
+        self.length = 800
 
 class GameObject:
     def __init__(self):
@@ -249,7 +274,7 @@ class Player(GameObject):
         GameObject.__init__(self)
         self.name = ""
         self.weapon = WeaponBase()
-        self.moveSpeed = 100
+        self.moveSpeed = 70
         self.width = 40
         self.height = 40
         self.id = 0
@@ -263,6 +288,7 @@ class Player(GameObject):
     def reborn(self, pos):
         self.pos = pos
         self.hp = 100
+        self.moveSpeed = 70
         self.weapon = WeaponBase()
         self.dead = False
 
@@ -273,6 +299,7 @@ class Player(GameObject):
         ret['hp'] = self.hp
         ret['name'] = self.name
         ret['angle'] = self.moveAngle
+        ret['weapon'] = self.weapon.name
         ret['speed'] = self.speed
         ret['id'] = self.id
         ret['dead'] = self.dead
@@ -283,7 +310,7 @@ class Player(GameObject):
 
     def move(self, time, m):
         if time != 0:
-            newPos = self.pos.getShift(self.moveAngle, self.speed*time)
+            newPos = self.pos.getShift(self.moveAngle, (self.speed - self.weapon.weight)*time)
             oldPos = self.pos.copy()
             self.pos = newPos
             # If already arrived at position or collide, stop
@@ -304,6 +331,7 @@ class Bullet(GameObject):
         self.height = 10
         self.length = 100
         self.damage = 0
+        self.features = set()
     
     def getInfo(self):
         ret = {}
@@ -311,18 +339,40 @@ class Bullet(GameObject):
         ret['y'] = self.pos.y
         ret['size'] = self.width
         ret['angle'] = self.moveAngle
-        ret['speed'] = self.speed
+        ret['speed'] = self.speed - self.weapon.weight
         ret['id'] = self.id
 
         return ret
 
+    def hasFeature(self, feature):
+        return feature in self.features
     def move(self, time, m):
         if time != 0:
             newPos = self.pos.getShift(self.moveAngle, self.speed*time)
             oldPos = self.pos.copy()
             self.pos = newPos
+            if self.hasFeature("zigzag"):
+                self.moveAngle = self.moveAngle + 0.2 * random.uniform(-1,1)
+            if self.hasFeature("variantSpeed"):
+                self.speed = self.speed + 30 * random.uniform(-1,1)
             # If already arrived at position or collide, stop
-            if m.collide(self):
+            if not self.hasFeature('penetrate') and m.collide(self):
+                if self.hasFeature('bounce') == True:
+                    bouncePos = oldPos.copy()
+                    self.pos = Point(newPos.x, oldPos.y)
+                    bounceX = False
+                    if m.collide(self):
+                        bouncePos.y = 2*newPos.y - oldPos.y
+                        bounceX = True
+                    self.pos = Point(oldPos.x, newPos.y)
+                    if m.collide(self):
+                        if bounceX:
+                            self.speed = 0
+                            return False
+                        bouncePos.x = 2*newPos.x - oldPos.x
+                    self.pos = newPos
+                    self.moveAngle = newPos.getAngle(bouncePos)
+                    return True
                 self.pos = oldPos
                 self.speed = 0
                 return False
@@ -359,6 +409,10 @@ class Item(GameObject):
             player.weapon = WeaponMp40()
         elif self.itemType == 'fg_42':
             player.weapon = WeaponFg42()
+        elif self.itemType == 'random_weapon_buff':
+            buff = random.choice(['bounce', 'penetrate', 'zigzag', 'variantSpeed', 'doubleLength'])
+            player.weapon.addFeature(buff)
+            
 
 class Game:
     def __init__(self):
@@ -366,7 +420,7 @@ class Game:
         self.height = 30
         self.gridSize = GRID_SIZE
         self.redisConn = RedisConn()
-        self.framePerSec = 10
+        self.framePerSec = 20
         self.gameMap = Map(height = self.height, width = self.width)
         self.gameMap.loadJson('./map.json')
         self.currFrame = 0
@@ -394,7 +448,7 @@ class Game:
             return p.id
         p = Player()
         p.setPos(x, y)
-        p.speed = 50
+        p.speed = 70
         p.channel = channel
         p.id = self.playerId
         p.name = name
@@ -444,9 +498,13 @@ class Game:
                     newBullets.append(bullet)
         self.bullets = newBullets
 
-    def generateItem(self):
-        x, y = self.gameMap.getRandomWalkableCoord()
-        item = Item()
+    def generateItem(self, pos = None, itemType = None):
+        if pos == None:
+            x, y = self.gameMap.getRandomWalkableCoord()
+        else:
+            x = pos.x
+            y = pos.y
+        item = Item(itemType)
         item.id = self.itemId
         item.setPos(x, y)
         self.itemId += 1
@@ -552,6 +610,8 @@ class Game:
                         p.dead = True
                         p.deadFrame = self.currFrame
                         p.death += 1
+                        self.generateItem(pos = p.pos, itemType = 'random_weapon_buff')
+                        
             if not bulletHit:
                 newBullets.append(b)
 
