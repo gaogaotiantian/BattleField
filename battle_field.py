@@ -274,7 +274,7 @@ class Player(GameObject):
         GameObject.__init__(self)
         self.name = ""
         self.weapon = WeaponBase()
-        self.moveSpeed = 70
+        self.moveSpeed = 110
         self.width = 40
         self.height = 40
         self.id = 0
@@ -288,7 +288,7 @@ class Player(GameObject):
     def reborn(self, pos):
         self.pos = pos
         self.hp = 100
-        self.moveSpeed = 70
+        self.moveSpeed = 110
         self.weapon = WeaponBase()
         self.dead = False
 
@@ -300,7 +300,7 @@ class Player(GameObject):
         ret['name'] = self.name
         ret['angle'] = self.moveAngle
         ret['weapon'] = self.weapon.name
-        ret['speed'] = self.speed - self.weapon.weight
+        ret['speed'] = self.speed
         ret['id'] = self.id
         ret['dead'] = self.dead
         ret['kill'] = self.kill
@@ -310,7 +310,7 @@ class Player(GameObject):
 
     def move(self, time, m):
         if time != 0:
-            newPos = self.pos.getShift(self.moveAngle, (self.speed - self.weapon.weight)*time)
+            newPos = self.pos.getShift(self.moveAngle, self.speed*time)
             oldPos = self.pos.copy()
             self.pos = newPos
             # If already arrived at position or collide, stop
@@ -553,7 +553,7 @@ class Game:
                     player = self.getPlayerById(action['player'])
                     if player and not player.dead:
                         player.lastAction = time.time()
-                        player.setMove(action['x'], action['y'], player.moveSpeed)
+                        player.setMove(action['x'], action['y'], player.moveSpeed-player.weapon.weight)
             elif actionType == 'shoot':
                 self.actionShoot(action)
 
