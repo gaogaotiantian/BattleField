@@ -300,7 +300,7 @@ class Player(GameObject):
         ret['name'] = self.name
         ret['angle'] = self.moveAngle
         ret['weapon'] = self.weapon.name
-        ret['speed'] = self.speed
+        ret['speed'] = self.speed - self.weapon.weight
         ret['id'] = self.id
         ret['dead'] = self.dead
         ret['kill'] = self.kill
@@ -339,7 +339,7 @@ class Bullet(GameObject):
         ret['y'] = self.pos.y
         ret['size'] = self.width
         ret['angle'] = self.moveAngle
-        ret['speed'] = self.speed - self.weapon.weight
+        ret['speed'] = self.speed
         ret['id'] = self.id
 
         return ret
