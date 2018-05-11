@@ -534,7 +534,7 @@ class Game:
             bulletHit = False
             for p in self.players:
                 if not p.dead and b.player != p.id and p.pos.getDist(b.pos) < p.width + b.width:
-                    p.hp -= 10
+                    p.hp -= b.damage
                     bulletHit = True
                     self.eventQueue.append({'eventType':'bulletHit', 'player':p.id})
                     if p.hp <= 0 and p.dead == False:
