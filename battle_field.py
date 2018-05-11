@@ -256,6 +256,7 @@ class Player(GameObject):
         self.hp = 100
         self.lastAction = None
         self.dead = False
+        self.deadFrame = 0
         self.kill = 0
         self.death = 0
 
@@ -427,7 +428,12 @@ class Game:
 
     def updatePlayers(self):
         for player in self.players:
-            player.move(1.0/self.framePerSec, self.gameMap)
+            if not player.dead:
+                player.move(1.0/self.framePerSec, self.gameMap)
+            else:
+                if self.currFrame - player.deadFrame > self.framePerSec:
+                    x, y = self.gameMap.getRandomWalkableCoord()
+                    player.reborn(Point(x, y))
 
     def updateBullets(self):
         newBullets = []
@@ -502,14 +508,13 @@ class Game:
     @actionRequire("player", "x", "y")
     def actionShoot(self, action):
         player = self.getPlayerById(action['player'])
+        player.lastAction = time.time()
         if player and not player.dead:
             angle = player.pos.getAngle(Point(action['x'], action['y']))
             pos = player.pos.getShift(angle, player.width)
             bList = player.weapon.fire(pos = pos, angle = angle, player = player, id = self.bulletId, currTime = self.currFrame / self.framePerSec)
             if bList != None:
                 for b in bList:
-                    player.lastAction = time.time()
-
                     player.setSpeed(0)
                     player.setAngle(angle)
                     self.addBullet(b)
@@ -545,6 +550,7 @@ class Game:
                         if atkPlayer:
                             atkPlayer.kill += 1
                         p.dead = True
+                        p.deadFrame = self.currFrame
                         p.death += 1
             if not bulletHit:
                 newBullets.append(b)
@@ -561,7 +567,7 @@ class Game:
 
         # Get rid of inactive players
         for p in self.players:
-            if p.lastAction >= time.time() - 60:
+            if p.lastAction >= time.time() - 120:
                 newPlayers.append(p)
 
         self.players = newPlayers
