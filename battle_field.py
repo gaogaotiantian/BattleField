@@ -128,6 +128,7 @@ class Weapon:
             b.setSpeed(self.speed)
             b.setAngle(angle)
             b.id = id
+            b.damage = self.damage
             b.player = player.id
             b.width = self.size
             b.height = self.size
@@ -190,6 +191,7 @@ class WeaponFg42(Weapon):
                 b.setPos(pos)
                 b.setSpeed(self.speed)
                 b.setAngle(angle+0.1*i-0.2)
+                b.damage = self.damage
                 b.id = id+i
                 b.player = player.id
                 b.width = self.size
@@ -300,6 +302,7 @@ class Bullet(GameObject):
         self.width = 10
         self.height = 10
         self.length = 100
+        self.damage = 0
     
     def getInfo(self):
         ret = {}
