@@ -6,9 +6,11 @@ import math
 import functools
 import random
 import json
+import queue
 
 import redis
 import gevent
+import gevent.queue
 
 if os.environ.get("REDISCLOUD_URL"):
     REDIS_URL = os.environ.get("REDISCLOUD_URL")
@@ -17,7 +19,7 @@ else:
     print("No redis url!")
     sys.exit(1)
     
-pool = redis.BlockingConnectionPool.from_url(REDIS_URL, max_connections=4)
+pool = redis.BlockingConnectionPool.from_url(REDIS_URL, max_connections=6)
 redisConn = redis.Redis(connection_pool = pool)
 
 GRID_SIZE = 64
@@ -53,6 +55,15 @@ class Point:
         x = length*math.cos(angle) + self.x
         y = length*math.sin(angle) + self.y
         return Point(x, y)
+    def getShiftX(self, angle, length):
+        x = length*math.cos(angle) + self.x
+        y = self.y
+        return Point(x, y)
+    def getShiftY(self, angle, length):
+        x = self.x
+        y = length*math.sin(angle) + self.y
+        return Point(x, y)
+
     def __repr__(self):
         return "({}, {})".format(self.x, self.y)
 
@@ -122,10 +133,10 @@ class Weapon:
         self.length = 300
         self.weight = 0
         self.possibleFeatures = set(["bounce", "penetrate", "zigzag", "variantSpeed", "doubleLength"])
-        self.features = set()
+        self.features = {}
 
     def addFeature(self, feature):
-        self.features.add(feature)
+        self.features[feature] = time.time()
 
     def fire(self, pos, angle, player, currTime, id, checkGap = True):
         if (not checkGap) or currTime - self.lastFire > self.gap:
@@ -139,8 +150,14 @@ class Weapon:
             b.width = self.size
             b.height = self.size
             b.length = self.length
+            expiredFeatures = []
             for feature in self.features:
-                b.features.add(feature)
+                if self.features[feature] < time.time() - 60:
+                    expiredFeatures.append(feature)
+                else:
+                    b.features.add(feature)
+            for feature in expiredFeatures:
+                self.features.pop(feature)
             if b.hasFeature('doubleLength'):
                 b.length *= 2
             self.lastFire = currTime
@@ -151,7 +168,7 @@ class WeaponBase(Weapon):
     def __init__(self):
         Weapon.__init__(self)
         self.name = 'base'
-        self.weight = 5
+        self.weight = 0
         
 class WeaponPistol(Weapon):
     def __init__(self):
@@ -200,7 +217,7 @@ class WeaponFg42(Weapon):
         Weapon.__init__(self)
         self.name = 'fg_42'
         self.gap = 1.2
-        self.damage = 10
+        self.damage = 12
         self.size = 4
         self.speed = 300
         self.length = 400
@@ -284,13 +301,26 @@ class Player(GameObject):
         self.deadFrame = 0
         self.kill = 0
         self.death = 0
+        self.features = {}
 
     def reborn(self, pos):
         self.pos = pos
         self.hp = 100
         self.moveSpeed = 110
         self.weapon = WeaponBase()
+        self.features = {}
         self.dead = False
+
+    def addFeature(self, feature):
+        self.features[feature] = time.time()
+
+    def hasFeature(self, feature):
+        if feature in self.features:
+            if self.features[feature] < time.time() - 60:
+                self.features.pop(feature)
+                return False
+            return True
+        return False
 
     def getInfo(self):
         ret = {}
@@ -305,20 +335,32 @@ class Player(GameObject):
         ret['dead'] = self.dead
         ret['kill'] = self.kill
         ret['death'] = self.death
+        ret['features'] = self.features
 
         return ret
 
     def move(self, time, m):
         if time != 0:
-            newPos = self.pos.getShift(self.moveAngle, self.speed*time)
+            speed = self.speed
+            newPos = self.pos.getShift(self.moveAngle, speed*time)
             oldPos = self.pos.copy()
             self.pos = newPos
             # If already arrived at position or collide, stop
-            if (self.pos.getDist(self.moveDestination) > oldPos.getDist(self.moveDestination)) or \
-                    m.collide(self):
+            if (self.pos.getDist(self.moveDestination) > oldPos.getDist(self.moveDestination)):
                 self.pos = oldPos
                 self.speed = 0
-                return False
+            if m.collide(self):
+                self.pos = oldPos.getShiftX(self.moveAngle, speed*time)
+                if m.collide(self):
+                    self.pos = oldPos.getShiftY(self.moveAngle, speed*time)
+                    if m.collide(self):
+                        self.speed = 0
+                        self.pos = oldPos
+                        return False
+                    else:
+                        return True
+                else:
+                    return True
             return True
 
         return False
@@ -383,7 +425,7 @@ class Item(GameObject):
     def __init__(self, itemType = None):
         GameObject.__init__(self)
         if itemType == None:
-            self.itemType = random.choice(['health', 'german_pistol', 'mp_43', 'm1_carbine', 'mp_40', 'fg_42'])
+            self.itemType = random.choices(['health', 'german_pistol', 'mp_43', 'm1_carbine', 'mp_40', 'fg_42'], weights = [4,1,1,1,1,1])[0]
         else:
             self.itemType = itemType
     
@@ -412,6 +454,9 @@ class Item(GameObject):
         elif self.itemType == 'random_weapon_buff':
             buff = random.choice(['bounce', 'penetrate', 'zigzag', 'variantSpeed', 'doubleLength'])
             player.weapon.addFeature(buff)
+        elif self.itemType == 'random_player_buff':
+            buff = random.choice(['defense', 'acceleration'])
+            player.addFeature(buff)
             
 
 class Game:
@@ -420,7 +465,8 @@ class Game:
         self.height = 30
         self.gridSize = GRID_SIZE
         self.redisConn = RedisConn()
-        self.framePerSec = 20
+        self.framePerSec = 60
+        self.broadcastFreq = 20
         self.gameMap = Map(height = self.height, width = self.width)
         self.gameMap.loadJson('./map.json')
         self.currFrame = 0
@@ -493,7 +539,7 @@ class Game:
         newBullets = []
         for bullet in self.bullets:
             if bullet.move(1.0/self.framePerSec, self.gameMap):
-                bullet.length -= bullet.speed / self.framePerSec
+                bullet.length -= abs(bullet.speed / self.framePerSec)
                 if bullet.length > 0:
                     newBullets.append(bullet)
         self.bullets = newBullets
@@ -514,7 +560,7 @@ class Game:
         self.updatePlayers()
         self.updateBullets()
         self.checkHit()
-        if len(self.items) < 5 + 2*len(self.players) and random.uniform(0, 1) < 0.005 + 0.001*len(self.players):
+        if len(self.items) < 5 + 2*len(self.players) and random.uniform(0, 1) < (1/20 + 1/100*len(self.players))/ self.framePerSec:
             self.generateItem()
         self.currFrame += 1
 
@@ -553,7 +599,11 @@ class Game:
                     player = self.getPlayerById(action['player'])
                     if player and not player.dead:
                         player.lastAction = time.time()
-                        player.setMove(action['x'], action['y'], player.moveSpeed-player.weapon.weight)
+                        speed = player.moveSpeed-player.weapon.weight
+                        if player.hasFeature("acceleration"):
+                            player.setMove(action['x'], action['y'], speed*2)
+                        else:
+                            player.setMove(action['x'], action['y'], speed)
             elif actionType == 'shoot':
                 self.actionShoot(action)
 
@@ -561,13 +611,14 @@ class Game:
                 self.actionJoin(action)
 
             elif actionType == 'leave':
-                self.actionLeave(action)
+                pass
+                #self.actionLeave(action)
     
     @actionRequire("player", "x", "y")
     def actionShoot(self, action):
         player = self.getPlayerById(action['player'])
-        player.lastAction = time.time()
         if player and not player.dead:
+            player.lastAction = time.time()
             angle = player.pos.getAngle(Point(action['x'], action['y']))
             pos = player.pos.getShift(angle, player.width)
             bList = player.weapon.fire(pos = pos, angle = angle, player = player, id = self.bulletId, currTime = self.currFrame / self.framePerSec)
@@ -589,6 +640,7 @@ class Game:
         channel = action['channel']
         for i in range(len(self.players)):
             if self.players[i].channel == channel:
+                print("Player Leave", self.players[i])
                 self.players.pop(i)
                 break
 
@@ -600,7 +652,10 @@ class Game:
             bulletHit = False
             for p in self.players:
                 if not p.dead and b.player != p.id and p.pos.getDist(b.pos) < p.width + b.width:
-                    p.hp -= b.damage
+                    if p.hasFeature("defense"):
+                        p.hp -= b.damage / 2
+                    else:
+                        p.hp -= b.damage
                     bulletHit = True
                     self.eventQueue.append({'eventType':'bulletHit', 'player':p.id})
                     if p.hp <= 0 and p.dead == False:
@@ -610,7 +665,7 @@ class Game:
                         p.dead = True
                         p.deadFrame = self.currFrame
                         p.death += 1
-                        self.generateItem(pos = p.pos, itemType = 'random_weapon_buff')
+                        self.generateItem(pos = p.pos, itemType = random.choices(['random_weapon_buff', 'random_player_buff'], weights = [70, 30])[0])
                         
             if not bulletHit:
                 newBullets.append(b)
@@ -629,6 +684,8 @@ class Game:
         for p in self.players:
             if p.lastAction >= time.time() - 120:
                 newPlayers.append(p)
+            else:
+                print("Inactive player", p.getInfo())
 
         self.players = newPlayers
         self.bullets = newBullets
@@ -640,40 +697,54 @@ class Game:
             currTime = time.time()
             while currTime > self.startTime + self.currFrame*(1/self.framePerSec):
                 self.updateFrame()
+
+                if self.currFrame % max(1, int(self.framePerSec / self.broadcastFreq)) == 0:
+                    self.redisConn.setDynamicGameInfo(self.getDynamicGameInfo())
+
             actions = self.redisConn.getActions()
             self.doActions(actions)
             
-            self.redisConn.setDynamicGameInfo(self.getDynamicGameInfo())
-            self.redisConn.setStaticMapInfo(self.getStaticMapInfo())
             for event in self.eventQueue:
                 self.redisConn.publishEvent(event)
             self.eventQueue = []
 
+            gevent.sleep(0)
 
 
 class RedisConn:
+    def __init__(self):
+        self.actionQueue = gevent.queue.Queue()
+        self.actionLoader = gevent.spawn(self.runActionQueue)
+        gevent.sleep(0)
+
+    def runActionQueue(self):
+        while True:
+            pipe = redisConn.pipeline()
+            pipe.lrange("actionQueue", 0, -1)
+            pipe.delete("actionQueue")
+            result = pipe.execute()
+            ret = []
+            if result and result[0]:
+                for r in result[0]:
+                    self.actionQueue.put(json.loads(r))
+            gevent.sleep(0)
+
     def setDynamicGameInfo(self, info):
         gevent.spawn(redisConn.set, "dynamicGameInfo", json.dumps(info), ex=3600)
-
-    def setStaticMapInfo(self, info):
-        gevent.spawn(redisConn.set, "staticMapInfo", json.dumps(info), ex=3600)
+        gevent.sleep(0)
 
     def publishEvent(self, event):
         gevent.spawn(redisConn.publish, 'events', json.dumps({'infoType':'event', 'event':event}))
+        gevent.sleep(0)
 
     def publishJoin(self, channel, id):
         gevent.spawn(redisConn.publish, 'events', json.dumps({'infoType':'joinInfo', 'channel':channel, 'id': id}))
-
+        gevent.sleep(0)
 
     def getActions(self):
-        pipe = redisConn.pipeline()
-        pipe.lrange("actionQueue", 0, -1)
-        pipe.delete("actionQueue")
-        result = pipe.execute()
         ret = []
-        if result and result[0]:
-            for r in result[0]:
-                ret.append(json.loads(r))
+        while not self.actionQueue.empty():
+            ret.append(self.actionQueue.get())
         return ret
 
 if __name__ == '__main__':
