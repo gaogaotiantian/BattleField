@@ -455,8 +455,11 @@ class Item(GameObject):
             buff = random.choice(['bounce', 'penetrate', 'zigzag', 'variantSpeed', 'doubleLength'])
             player.weapon.addFeature(buff)
         elif self.itemType == 'random_player_buff':
-            buff = random.choice(['defense', 'acceleration'])
-            player.addFeature(buff)
+            buff = random.choice(['defense', 'acceleration', 'full_health'])
+            if buff == 'full_health':
+                player.hp = 100
+            else:
+                player.addFeature(buff)
             
 
 class Game:
