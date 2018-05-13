@@ -19,7 +19,7 @@ else:
     print("No redis url!")
     sys.exit(1)
     
-pool = redis.BlockingConnectionPool.from_url(REDIS_URL, max_connections=6)
+pool = redis.BlockingConnectionPool.from_url(REDIS_URL, max_connections=30)
 redisConn = redis.Redis(connection_pool = pool)
 
 GRID_SIZE = 64
