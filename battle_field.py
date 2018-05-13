@@ -667,7 +667,7 @@ class Game:
                     else:
                         p.hp -= b.damage
                     bulletHit = True
-                    #self.eventQueue.append({'eventType':'bulletHit', 'player':p.id})
+                    self.eventQueue.append({'eventType':'bulletHit', 'player':p.id})
                     if p.hp <= 0 and p.dead == False:
                         atkPlayer = self.getPlayerById(b.player)
                         if atkPlayer:
@@ -715,7 +715,7 @@ class Game:
                 frameCount += 1
             frameTime += time.time() - currTime
             if frameCount > 200:
-                print("frame time is {}, max fps is {}", frameTime / frameCount, frameCount / frameTime)
+                #print("frame time is {}, max fps is {}", frameTime / frameCount, frameCount / frameTime)
                 frameCount = 0
                 frameTime = 0
 
@@ -728,7 +728,7 @@ class Game:
                 self.redisConn.publishEvent(self.eventQueue)
                 self.eventQueue = []
 
-            gevent.sleep(0)
+            gevent.sleep(0.005)
 
 
 class RedisConn:
