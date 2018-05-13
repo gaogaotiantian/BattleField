@@ -132,6 +132,7 @@ class Weapon:
         self.lastFire = 0
         self.length = 300
         self.weight = 0
+        self.jitter = 0
         self.possibleFeatures = set(["bounce", "penetrate", "zigzag", "variantSpeed", "doubleLength"])
         self.features = {}
 
@@ -143,7 +144,7 @@ class Weapon:
             b = Bullet()
             b.setPos(pos)
             b.setSpeed(self.speed)
-            b.setAngle(angle)
+            b.setAngle(angle + self.jitter*random.uniform(-1,1))
             b.id = id
             b.damage = self.damage
             b.player = player.id
@@ -178,6 +179,7 @@ class WeaponPistol(Weapon):
         self.damage = 7
         self.size = 3
         self.weight = 5
+        self.jitter = 0.05
 
 class WeaponMp40(Weapon):
     def __init__(self):
@@ -189,6 +191,7 @@ class WeaponMp40(Weapon):
         self.speed = 300
         self.length = 600
         self.weight = 10
+        self.jitter = 0.1
 
 class WeaponMp43(Weapon):
     def __init__(self):
@@ -199,6 +202,7 @@ class WeaponMp43(Weapon):
         self.size = 6
         self.speed = 300
         self.weight = 20
+        self.jitter = 0.15
         self.length = 700
 
 class WeaponM1(Weapon):
@@ -211,6 +215,7 @@ class WeaponM1(Weapon):
         self.speed = 450
         self.length = 1000
         self.weight = 25
+        self.jitter = 0.05
 
 class WeaponFg42(Weapon):
     def __init__(self):
@@ -222,6 +227,8 @@ class WeaponFg42(Weapon):
         self.speed = 300
         self.length = 400
         self.weight = 20
+        self.jitter = 0.1
+
     def fire(self, pos, angle, player, currTime, id):
         if currTime - self.lastFire > self.gap:
             ret = []
@@ -660,7 +667,7 @@ class Game:
                     else:
                         p.hp -= b.damage
                     bulletHit = True
-                    self.eventQueue.append({'eventType':'bulletHit', 'player':p.id})
+                    #self.eventQueue.append({'eventType':'bulletHit', 'player':p.id})
                     if p.hp <= 0 and p.dead == False:
                         atkPlayer = self.getPlayerById(b.player)
                         if atkPlayer:
@@ -696,6 +703,8 @@ class Game:
 
     def run(self):
         self.startTime = time.time()
+        frameCount = 0
+        frameTime = 0
         while True:
             currTime = time.time()
             while currTime > self.startTime + self.currFrame*(1/self.framePerSec):
@@ -703,13 +712,21 @@ class Game:
 
                 if self.currFrame % max(1, int(self.framePerSec / self.broadcastFreq)) == 0:
                     self.redisConn.setDynamicGameInfo(self.getDynamicGameInfo())
+                frameCount += 1
+            frameTime += time.time() - currTime
+            if frameCount > 200:
+                print("frame time is {}, max fps is {}", frameTime / frameCount, frameCount / frameTime)
+                frameCount = 0
+                frameTime = 0
+
+            
 
             actions = self.redisConn.getActions()
             self.doActions(actions)
             
-            for event in self.eventQueue:
-                self.redisConn.publishEvent(event)
-            self.eventQueue = []
+            if len(self.eventQueue) > 0:
+                self.redisConn.publishEvent(self.eventQueue)
+                self.eventQueue = []
 
             gevent.sleep(0)
 
@@ -728,8 +745,10 @@ class RedisConn:
             result = pipe.execute()
             ret = []
             if result and result[0]:
-                for r in result[0]:
-                    self.actionQueue.put(json.loads(r))
+                for lstStr in result[0]:
+                    lst = json.loads(lstStr)
+                    for r in lst:
+                        self.actionQueue.put(r)
             gevent.sleep(0)
 
     def setDynamicGameInfo(self, info):
