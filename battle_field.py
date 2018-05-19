@@ -734,22 +734,20 @@ class Game:
 class RedisConn:
     def __init__(self):
         self.actionQueue = gevent.queue.Queue()
+        self.pubsub = redisConn.pubsub()
+        self.pubsub.subscribe('actions')
         self.actionLoader = gevent.spawn(self.runActionQueue)
         gevent.sleep(0)
 
     def runActionQueue(self):
-        while True:
-            pipe = redisConn.pipeline()
-            pipe.lrange("actionQueue", 0, -1)
-            pipe.delete("actionQueue")
-            result = pipe.execute()
-            ret = []
-            if result and result[0]:
-                for lstStr in result[0]:
-                    lst = json.loads(lstStr)
-                    for r in lst:
-                        self.actionQueue.put(r)
-            gevent.sleep(0)
+        for message in self.pubsub.listen():
+            data = message.get('data')
+            if message['type'] == 'message':
+                dataStr = data.decode('utf-8')
+                print(dataStr)
+                lst = json.loads(dataStr)
+                for r in lst:
+                    self.actionQueue.put(r)
 
     def setDynamicGameInfo(self, info):
         gevent.spawn(redisConn.set, "dynamicGameInfo", json.dumps(info), ex=3600)
